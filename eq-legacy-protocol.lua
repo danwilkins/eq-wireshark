@@ -1,3 +1,5 @@
+require("bit-compat")
+
 Flags = {
   UnknownBit0 = 0x0001,
   HasAckRequest = 0x0002,
@@ -2455,9 +2457,36 @@ GAME_OPCODES = {
   [0x1542] = {
     name ="MSG_UPDATE_ALT_ABILS",
   },
-  [0x9f40] = {
-    name ="MSG_UPDATE_BUFFER",
+[0x9f40] = {
+  name = "MSG_UPDATE_BUFFER",
+
+  f = {
+    count = ProtoField.uint32("everquest.update_buffer.count", "Num Updates"),
   },
+
+  dissect = function(self, tree, buffer)
+    local off  = 0
+    local n    = buffer(off, 4):le_uint()
+    tree:add_le(self.f.count, buffer(off, 4))
+    off = off + 4
+
+    -- Grab the already-defined entry for 0xF340 so we can reuse its parser
+    local update_stats = GAME_OPCODES[0xf340]
+    local UPDATE_SIZE  = 15
+
+    for i = 1, n do
+      -- Safety check: don’t overrun short or malformed packets
+      if off + UPDATE_SIZE > buffer:len() then break end
+
+      local chunk  = buffer(off, UPDATE_SIZE)
+      local child  = tree:add(chunk, string.format("Update %u", i))
+      -- Re-invoke the MSG_UPDATE_STATS dissector without duplicating code
+      update_stats:dissect(child, chunk)
+
+      off = off + UPDATE_SIZE
+    end
+  end,
+},
   [0xff41] = {
     name ="MSG_UPDATE_FILTERS",
   },
@@ -2476,9 +2505,81 @@ GAME_OPCODES = {
   [0x4442] = {
     name ="MSG_UPDATE_PET_INFO",
   },
-  [0xf340] = {
-    name ="MSG_UPDATE_STATS",
-  },
+[0xf340] = {
+    name = "MSG_UPDATE_STATS",
+
+    f = {
+        id      = ProtoField.uint16("everquest.update_stats.id", "Id"),
+        accel   = ProtoField.int8("everquest.update_stats.accel", "Acceleration"),
+        heading = ProtoField.uint8("everquest.update_stats.heading", "Heading"),
+        rate_h  = ProtoField.int8("everquest.update_stats.rate_h", "Rate Heading"),
+        x       = ProtoField.int16("everquest.update_stats.x", "X"),
+        y       = ProtoField.int16("everquest.update_stats.y", "Y"),
+        z       = ProtoField.int16("everquest.update_stats.z", "Z"),
+
+        vel_raw = ProtoField.uint32("everquest.update_stats.vel_raw", "Velocities (packed)", base.HEX),
+        vel_x   = ProtoField.float("everquest.update_stats.vel_x", "Velocity X"),
+        vel_y   = ProtoField.float("everquest.update_stats.vel_y", "Velocity Y"),
+        vel_z   = ProtoField.float("everquest.update_stats.vel_z", "Velocity Z"),
+    },
+
+    dissect = function(self, tree, buffer)
+        local bit = bit32
+        local off = 0
+
+        tree:add_le(self.f.id,      buffer(off, 2)); off = off + 2
+        tree:add   (self.f.accel,   buffer(off, 1)); off = off + 1
+        tree:add   (self.f.heading, buffer(off, 1)); off = off + 1
+        tree:add   (self.f.rate_h,  buffer(off, 1)); off = off + 1
+        tree:add_le(self.f.x,       buffer(off, 2)); off = off + 2
+        tree:add_le(self.f.y,       buffer(off, 2)); off = off + 2
+        tree:add_le(self.f.z,       buffer(off, 2)); off = off + 2
+
+        local vel_raw_buf = buffer(off, 4)
+        local vel_raw = vel_raw_buf:le_uint()
+        tree:add_le(self.f.vel_raw, vel_raw_buf)
+        off = off + 4
+
+        local SCALE_INV = 1 / 16
+        local MASK11 = 0x7FF
+        local SIGN11 = 0x400
+        local SIGN10 = 0x200
+
+        local function to_s32(u)
+            if u >= 0x80000000 then
+                return u - 0x100000000
+            else
+                return u
+            end
+        end
+
+        -- vx: lower 11 bits
+        local vx_u = bit.band(vel_raw, MASK11)
+        if bit.band(vx_u, SIGN11) ~= 0 then
+            vx_u = bit.bor(vx_u, 0xFFFFF800)
+        end
+        local vx = to_s32(vx_u) * SCALE_INV
+        tree:add(self.f.vel_x, vx)
+
+        -- vy: upper 10 bits (bits 22–31)
+        local vy_u = bit.rshift(vel_raw, 22)
+        if bit.band(vy_u, SIGN10) ~= 0 then
+            vy_u = bit.bor(vy_u, 0xFFFFFC00)
+        end
+        local vy = to_s32(vy_u) * SCALE_INV
+        tree:add(self.f.vel_y, vy)
+
+        -- vz: middle 11 bits (bits 11–21)
+        local vz_u = bit.band(bit.rshift(vel_raw, 11), MASK11)
+        if bit.band(vz_u, SIGN11) ~= 0 then
+            vz_u = bit.bor(vz_u, 0xFFFFF800)
+        end
+        local vz = to_s32(vz_u) * SCALE_INV
+        tree:add(self.f.vel_z, vz)
+    end,
+},
+
+
   [0x4d40] = {
     name ="MSG_UPD_CORPSE",
   },
